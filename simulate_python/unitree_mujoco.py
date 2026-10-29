@@ -18,6 +18,7 @@ mj_data = mujoco.MjData(mj_model)
 
 if config.ENABLE_ELASTIC_BAND:
     elastic_band = ElasticBand()
+    elastic_band.length = getattr(config, "ELASTIC_BAND_LENGTH", 0.0)
     if config.ROBOT == "h1" or config.ROBOT == "g1":
         band_attached_link = mj_model.body("torso_link").id
     else:
@@ -52,10 +53,13 @@ def SimulationThread():
         locker.acquire()
 
         if config.ENABLE_ELASTIC_BAND:
+            if unitree.joystick is not None:
+                elastic_band.JoystickUpdate(unitree.joystick, unitree.button_id)
             if elastic_band.enable:
                 mj_data.xfrc_applied[band_attached_link, :3] = elastic_band.Advance(
                     mj_data.qpos[:3], mj_data.qvel[:3]
                 )
+        unitree.ApplyLowCmd()  # PD evaluated every physics step (see LowCmdHandler)
         mujoco.mj_step(mj_model, mj_data)
 
         locker.release()

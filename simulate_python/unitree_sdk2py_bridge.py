@@ -109,18 +109,30 @@ class UnitreeSdk2Bridge:
         }
 
     def LowCmdHandler(self, msg: LowCmd_):
-        if self.mj_data != None:
-            for i in range(self.num_motor):
-                self.mj_data.ctrl[i] = (
-                    msg.motor_cmd[i].tau
-                    + msg.motor_cmd[i].kp
-                    * (msg.motor_cmd[i].q - self.mj_data.sensordata[i])
-                    + msg.motor_cmd[i].kd
-                    * (
-                        msg.motor_cmd[i].dq
-                        - self.mj_data.sensordata[i + self.num_motor]
-                    )
-                )
+        # Only latch the command: the PD law is evaluated every physics step in
+        # ApplyLowCmd(), like the motor drivers' own high-rate loop. Computing it
+        # here, once per message from 1-step-stale sensordata, is a delayed
+        # sample-and-hold PD that goes unstable on low-inertia joints.
+        n = self.num_motor
+        cmd = np.array(
+            [[c.q, c.dq, c.kp, c.kd, c.tau] for c in list(msg.motor_cmd)[:n]], dtype=np.float64
+        )
+        self._latest_cmd = cmd
+
+    def ApplyLowCmd(self):
+        """Evaluate tau + kp*(q_des - q) + kd*(dq_des - dq) on the current state; call before each mj_step."""
+        cmd = getattr(self, "_latest_cmd", None)
+        if cmd is None or self.mj_data is None:
+            return
+        if not hasattr(self, "_act_qpos_adr"):
+            jnt = self.mj_model.actuator_trnid[: self.num_motor, 0]
+            self._act_qpos_adr = self.mj_model.jnt_qposadr[jnt]
+            self._act_dof_adr = self.mj_model.jnt_dofadr[jnt]
+        q = self.mj_data.qpos[self._act_qpos_adr]
+        dq = self.mj_data.qvel[self._act_dof_adr]
+        self.mj_data.ctrl[: self.num_motor] = (
+            cmd[:, 4] + cmd[:, 2] * (cmd[:, 0] - q) + cmd[:, 3] * (cmd[:, 1] - dq)
+        )
 
     def PublishLowState(self):
         if self.mj_data != None:
@@ -420,9 +432,27 @@ class ElasticBand:
 
     def MujuocoKeyCallback(self, key):
         glfw = mujoco.glfw.glfw
-        if key == glfw.KEY_7:
+        if key in (glfw.KEY_7, glfw.KEY_KP_7):
             self.length -= 0.1
-        if key == glfw.KEY_8:
+        if key in (glfw.KEY_8, glfw.KEY_KP_8):
             self.length += 0.1
-        if key == glfw.KEY_9:
-            self.enable = not self.enable
+        if key in (glfw.KEY_9, glfw.KEY_KP_9):
+            self.Toggle()
+
+    def Toggle(self):
+        self.enable = not self.enable
+        print(f"Elastic band {'attached' if self.enable else 'RELEASED'} (length={self.length:.1f})", flush=True)
+
+    def JoystickUpdate(self, joystick, button_id):
+        """Edge-triggered gamepad control: LB lowers, RB raises, Y releases / re-attaches."""
+        pressed = {k: bool(joystick.get_button(button_id[k])) for k in ("LB", "RB", "Y")}
+        prev = getattr(self, "_prev_buttons", {k: False for k in pressed})
+        if pressed["LB"] and not prev["LB"]:
+            self.length += 0.1
+            print(f"Elastic band length={self.length:.1f} (lower)", flush=True)
+        if pressed["RB"] and not prev["RB"]:
+            self.length -= 0.1
+            print(f"Elastic band length={self.length:.1f} (raise)", flush=True)
+        if pressed["Y"] and not prev["Y"]:
+            self.Toggle()
+        self._prev_buttons = pressed

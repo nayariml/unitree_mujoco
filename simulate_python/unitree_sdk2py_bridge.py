@@ -58,6 +58,8 @@ class UnitreeSdk2Bridge:
 
         # Unitree sdk2 message
         self.low_state = LowState_default()
+        if config.ROBOT == "g1":
+            self.low_state.mode_machine = config.G1_MODE_MACHINE
         self.low_state_puber = ChannelPublisher(TOPIC_LOWSTATE, LowState_)
         self.low_state_puber.Init()
         self.lowStateThread = RecurrentThread(
